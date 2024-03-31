@@ -13,8 +13,6 @@ contract Air_Conditioner is ERC20, ReentrancyGuard {
 
 
     // Events for logging various actions on the contract
-    event Bought    (address indexed buyer, uint256 ethAmount, uint256 airAmount);
-    event Sold      (address indexed seller, uint256 airAmount, uint256 ethAmount);
     event Staked    (address indexed user, uint256 amount);
     event Unstaked  (address indexed user, uint256 amount);
     event Withdrawn (address indexed user, uint256 amount);
@@ -39,7 +37,7 @@ contract Air_Conditioner is ERC20, ReentrancyGuard {
 
 
     // Mappings for different contract states
-    mapping(address => bool)               public check_airdropClaimed;
+    mapping(address => uint256)            public check_claimableTime;
     mapping(address => Stake)              public check_stakingAmount;
     mapping(address => Pending)            public check_pendingWithdrawal;
     mapping(address => Referral)           public check_referrals;
@@ -55,7 +53,7 @@ contract Air_Conditioner is ERC20, ReentrancyGuard {
     constructor() ERC20("AIR", "AIR") {
         owner   = _msgSender(); // Set the contract deployer as the initial owner
         relayer = _msgSender(); // Set the contract deployer as the initial relayer
-        _mint(_msgSender(), 1000000000 * 10 ** decimals()); // Mint initial token supply to the deployer
+        _mint(_msgSender(), 1000000000 * 10 ** decimals()); // Mint initial token supply to the team
     }
 
 
@@ -89,7 +87,7 @@ contract Air_Conditioner is ERC20, ReentrancyGuard {
      *
      * Emits a {CrossChainReceive} event.
      */
-    function relayerMint(uint256 chainID, address to, uint256 amount) public {
+    function relayerMint(uint256 chainID, address to, uint256 amount) public nonReentrant{
         require(_msgSender() == relayer, "Only relayer can mint tokens");
         _mint(to, amount); // Mint tokens to the specified address
         emit crossChainReceive(chainID, to, amount); // Emit an event for cross-chain receive
@@ -103,37 +101,11 @@ contract Air_Conditioner is ERC20, ReentrancyGuard {
      *
      * Emits a {CrossChainRequested} event.
      */
-    function requestCrossChainTransfer(uint256 amount, uint256 chainId) public {
+    function requestCrossChainTransfer(uint256 amount, uint256 chainId) public nonReentrant{
         require(balanceOf(_msgSender()) >= amount, "Insufficient balance");
         _burn(_msgSender(), amount); // Burn the specified amount of tokens
         crossChainTransfers[_msgSender()] = CrossChainTransfer(amount, chainId); // Record the cross-chain transfer request
         emit CrossChainRequested(_msgSender(), amount, chainId); // Emit an event for the cross-chain request
-    }
-
-
-
-    /**
-     * @dev Calculates the amount of AIR tokens that can be purchased with a given amount of ETH.
-     * This calculation is based on the current total supply of AIR tokens and applies a conversion
-     * rate that scales linearly with the supply.
-     *
-     * @param ethAmount The amount of Ether (in wei) to convert into AIR tokens.
-     * @return amount The calculated amount of AIR tokens that can be purchased.
-     */
-    function check_purchaseAmount(uint256 ethAmount) public view returns (uint256) {
-        require(ethAmount < 99 ether, "Each transaction amount cannot exceed 99 native coinbase.");
-        uint256 ts = totalSupply();
-        uint256 dec = decimals();
-        uint256 amount;
-        assembly {
-            // Convert ethAmount to wei for precision in calculations
-            let ethAmountInWei := mul(ethAmount, exp(10, 18))
-
-            // Calculate the purchase amount using a linear conversion formula
-            // to avoid precision loss: (EthAmountInWei * TotalSupply) / (10^(18 + decimals))
-            amount := div(mul(ethAmountInWei, ts), exp(10, add(18, dec)))
-        }
-        return amount;
     }
 
 
@@ -186,53 +158,17 @@ contract Air_Conditioner is ERC20, ReentrancyGuard {
 
 
 
-    /**
-    * @dev Executes a token purchase operation.
-    * 
-    * This function handles the internal logic for purchasing AIR tokens in exchange for ETH.
-    * It calculates the number of AIR tokens to be purchased based on the provided ETH amount,
-    * transfers these tokens to the buyer, and transfers the ETH to the contract owner.
-    *
-    * Emits a `Bought` event upon successful purchase.
-    *
-    * Requirements:
-    * - The call to transfer AIR tokens to the buyer must succeed.
-    * - ETH amount sent must be transferred to the contract owner.
-    */
-    function buy() internal nonReentrant {
-        // Calculate the amount of AIR tokens that can be bought with the provided ETH amount.
-        uint256 amount = check_purchaseAmount(msg.value);
-        // Construct calldata for transferring AIR tokens to the buyer.
-        bytes memory transferCalldata = abi.encodeWithSelector(ERC20(address(this)).transfer.selector, _msgSender(), amount);
-        // Call the ERC20 transfer function to transfer tokens to the buyer.
-        (bool successTransfer, ) = address(this).call(transferCalldata);
-        require(successTransfer, "Token transfer failed");
-        // Transfer the ETH amount to the contract owner.
-        uint256 ethAmount = msg.value;
-        address ownerAddress = owner;
-        assembly {
-            // Call to transfer ETH to the owner.
-            let success := call(gas(), ownerAddress, ethAmount, 0, 0, 0, 0)
-
-            // Revert the transaction if the ETH transfer fails.
-            if iszero(success) { revert(0, 0) }
-        }
-
-        // Emit an event logging the purchase.
-        emit Bought(_msgSender(), msg.value, amount);
-    }
-
-
 
     /**
-     * @dev Claims the airdrop for the sender. Can only be claimed once per address.
+     * @dev Claims the airdrop for the sender. Once per address each 24 hours.
      * This function mints a predefined amount of tokens to the sender's address.
      * Requires that the airdrop for the sender has not already been claimed.
      */
     function claim() external nonReentrant {
-        require(!check_airdropClaimed[_msgSender()], "Airdrop already claimed.");
+        require(block.timestamp >= check_claimableTime[msg.sender], "Claim not available yet");
         _mint(_msgSender(), 1 * 10 ** decimals());
-        check_airdropClaimed[_msgSender()] = true;
+        // Update the next claimable time to 24 hours from now
+        check_claimableTime[msg.sender] = block.timestamp + 24 hours;
         emit Claimed(_msgSender(), 1 * 10 ** decimals());
     }
 
@@ -349,7 +285,7 @@ contract Air_Conditioner is ERC20, ReentrancyGuard {
 
 
     /**
-     * @dev Allows users to withdraw their staked tokens after the lock period.
+     * @dev Allows users to withdraw their staked $Air after the lock period.
      * Requirements:
      * - The current timestamp must be greater than or equal to the release time.
      * - The user must have a pending withdrawal.
@@ -366,24 +302,6 @@ contract Air_Conditioner is ERC20, ReentrancyGuard {
         emit Withdrawn(_msgSender(), amountToWithdraw); // Emit an event for the withdrawal.
     }
 
-
-
-    /**
-     * @dev Fallback function to handle ETH sent directly to the contract.
-     * Calls the buy function when ETH is received.
-     */
-    fallback() external payable nonReentrant {
-        buy();
-    }
-
-
-
-    /**
-     * @dev Receive function to handle ETH sent directly to the contract.
-     * It's an alias to the fallback function.
-     */
-    receive() external payable nonReentrant {
-        buy();
-    }
+    
 
 }
